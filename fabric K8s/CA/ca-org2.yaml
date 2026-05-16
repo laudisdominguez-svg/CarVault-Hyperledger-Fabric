@@ -1,0 +1,141 @@
+---
+# ═══════════════════════════════════════════════════════════
+#  CA — Org2
+#  Deployment + Service
+# ═══════════════════════════════════════════════════════════
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ca-org2
+  namespace: fabric
+  labels:
+    app: ca-org2
+    org: org2
+    component: ca
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ca-org2
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: ca-org2
+        org: org2
+        component: ca
+    spec:
+      initContainers:
+        - name: config-init
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              if [ ! -f /data/fabric-ca-server-config.yaml ]; then
+                echo "Copiando config inicial..."
+                cp /config/fabric-ca-server-config.yaml /data/fabric-ca-server-config.yaml
+              else
+                echo "Config ya existe, omitiendo copia."
+              fi
+          volumeMounts:
+            - name: ca-data
+              mountPath: /data
+            - name: ca-config
+              mountPath: /config
+
+      containers:
+        - name: ca-org2
+          image: hyperledger/fabric-ca:1.5.7
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              fabric-ca-server start -b $(CA_ADMIN_USER):$(CA_ADMIN_PASSWORD) -d \
+                --home /etc/hyperledger/fabric-ca-server
+          env:
+            - name: FABRIC_CA_HOME
+              value: /etc/hyperledger/fabric-ca-server
+            - name: FABRIC_CA_SERVER_CA_NAME
+              value: ca-org2
+            - name: FABRIC_CA_SERVER_TLS_ENABLED
+              value: "true"
+            - name: FABRIC_CA_SERVER_PORT
+              value: "8054"
+            - name: FABRIC_CA_SERVER_OPERATIONS_LISTENADDRESS
+              value: "0.0.0.0:18054"
+            - name: CA_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: fabric-ca-credentials
+                  key: admin-user
+            - name: CA_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fabric-ca-credentials
+                  key: admin-password
+          ports:
+            - name: ca
+              containerPort: 8054
+              protocol: TCP
+            - name: operations
+              containerPort: 18054
+              protocol: TCP
+          volumeMounts:
+            - name: ca-data
+              mountPath: /etc/hyperledger/fabric-ca-server
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 18054
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 18054
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+      volumes:
+        - name: ca-data
+          persistentVolumeClaim:
+            claimName: ca-org2-pvc
+        - name: ca-config
+          configMap:
+            name: ca-org2-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ca-org2
+  namespace: fabric
+  labels:
+    app: ca-org2
+    org: org2
+spec:
+  selector:
+    app: ca-org2
+  ports:
+    - name: ca
+      port: 8054
+      targetPort: 8054
+      protocol: TCP
+    - name: operations
+      port: 18054
+      targetPort: 18054
+      protocol: TCP
+  type: ClusterIP
