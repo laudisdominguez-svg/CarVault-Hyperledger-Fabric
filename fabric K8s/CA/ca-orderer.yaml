@@ -1,0 +1,226 @@
+---
+# ═══════════════════════════════════════════════════════════
+#  CA — Orderer
+#  Deployment + Service
+# ═══════════════════════════════════════════════════════════
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ca-orderer-config
+  namespace: fabric
+data:
+  fabric-ca-server-config.yaml: |
+    version: 1.5.7
+    port: 9054
+    debug: false
+    crlsizelimit: 512000
+    tls:
+      enabled: true
+      certfile:
+      keyfile:
+      clientauth:
+        type: noclientcert
+        certfiles:
+    ca:
+      name: ca-orderer
+    registry:
+      maxenrollments: -1
+      identities:
+        - name: admin
+          pass: adminpw
+          type: client
+          affiliation: ""
+          attrs:
+            hf.Registrar.Roles: "*"
+            hf.Registrar.DelegateRoles: "*"
+            hf.Revoker: true
+            hf.IntermediateCA: true
+            hf.GenCRL: true
+            hf.Registrar.Attributes: "*"
+            hf.AffiliationMgr: true
+    db:
+      type: sqlite3
+      datasource: fabric-ca-server.db
+      tls:
+        enabled: false
+    signing:
+      default:
+        usage:
+          - digital signature
+        expiry: 8760h
+      profiles:
+        ca:
+          usage:
+            - cert sign
+            - crl sign
+          expiry: 43800h
+          caconstraint:
+            isca: true
+            maxpathlen: 0
+        tls:
+          usage:
+            - signing
+            - key encipherment
+            - server auth
+            - client auth
+            - key agreement
+          expiry: 8760h
+    csr:
+      cn: ca-orderer
+      keyrequest:
+        algo: ecdsa
+        size: 256
+      names:
+        - C: US
+          ST: "North Carolina"
+          O: example.com
+      hosts:
+        - ca-orderer
+        - ca-orderer.fabric.svc.cluster.local
+        - localhost
+        - 127.0.0.1
+      ca:
+        expiry: 131400h
+        pathlength: 1
+    bccsp:
+      default: SW
+      sw:
+        hash: SHA2
+        security: 256
+        filekeystore:
+          keystore: msp/keystore
+    operations:
+      listenAddress: 0.0.0.0:19054
+      tls:
+        enabled: false
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ca-orderer
+  namespace: fabric
+  labels:
+    app: ca-orderer
+    component: ca
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ca-orderer
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: ca-orderer
+        component: ca
+    spec:
+      initContainers:
+        - name: config-init
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              if [ ! -f /data/fabric-ca-server-config.yaml ]; then
+                cp /config/fabric-ca-server-config.yaml /data/fabric-ca-server-config.yaml
+              fi
+          volumeMounts:
+            - name: ca-data
+              mountPath: /data
+            - name: ca-config
+              mountPath: /config
+
+      containers:
+        - name: ca-orderer
+          image: hyperledger/fabric-ca:1.5.7
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              fabric-ca-server start -b $(CA_ADMIN_USER):$(CA_ADMIN_PASSWORD) -d \
+                --home /etc/hyperledger/fabric-ca-server
+          env:
+            - name: FABRIC_CA_HOME
+              value: /etc/hyperledger/fabric-ca-server
+            - name: FABRIC_CA_SERVER_CA_NAME
+              value: ca-orderer
+            - name: FABRIC_CA_SERVER_TLS_ENABLED
+              value: "true"
+            - name: FABRIC_CA_SERVER_PORT
+              value: "9054"
+            - name: FABRIC_CA_SERVER_OPERATIONS_LISTENADDRESS
+              value: "0.0.0.0:19054"
+            - name: CA_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: fabric-ca-credentials
+                  key: admin-user
+            - name: CA_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fabric-ca-credentials
+                  key: admin-password
+          ports:
+            - name: ca
+              containerPort: 9054
+              protocol: TCP
+            - name: operations
+              containerPort: 19054
+              protocol: TCP
+          volumeMounts:
+            - name: ca-data
+              mountPath: /etc/hyperledger/fabric-ca-server
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 19054
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 19054
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+      volumes:
+        - name: ca-data
+          persistentVolumeClaim:
+            claimName: ca-orderer-pvc
+        - name: ca-config
+          configMap:
+            name: ca-orderer-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ca-orderer
+  namespace: fabric
+  labels:
+    app: ca-orderer
+spec:
+  selector:
+    app: ca-orderer
+  ports:
+    - name: ca
+      port: 9054
+      targetPort: 9054
+      protocol: TCP
+    - name: operations
+      port: 19054
+      targetPort: 19054
+      protocol: TCP
+  type: ClusterIP
