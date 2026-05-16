@@ -1,0 +1,31 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════
+#  Genesis Block Configuration
+#
+#  IMPORTANTE: Este archivo debe ser poblado con el contenido del 
+#  genesis.block después de ejecutar generate-genesis.sh
+#
+#  Uso:
+#  1. Ejecutar: ./generate-genesis.sh
+#  2. Convertir a base64: cat channel-artifacts/genesis.block | base64 -w 0
+#  3. Pegar el contenido en este archivo bajo genesisBlock data
+#  4. Aplicar: kubectl apply -f CA/07-genesis-configmap.yaml
+#
+#  O, generar automáticamente:
+#  $ kubectl create configmap genesis-block \
+#      --from-file=genesis.block=channel-artifacts/genesis.block \
+#      -n fabric
+# ═══════════════════════════════════════════════════════════════════════════
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: genesis-block
+  namespace: fabric
+  labels:
+    app: fabric
+    component: orderer
+data:
+  # PLACEHOLDER — generar con: cat genesis.block | base64 -w 0
+  # Este valor será reemplazado después de generar el genesis block
+  genesis.block.b64: ""
