@@ -1,0 +1,127 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════
+#  RBAC — Role-Based Access Control
+#
+#  Define permisos para los componentes de Fabric en Kubernetes
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── ServiceAccount para Fabric ──────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fabric
+  namespace: fabric
+  labels:
+    app: fabric
+
+---
+# ── ClusterRole para Fabric ────────────────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fabric-cluster-role
+  labels:
+    app: fabric
+rules:
+  # Permisos para leer pods (para discovery)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+  # Permisos para leer servicios
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+
+  # Permisos para leer configmaps
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+
+  # Permisos para leer secrets
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+
+  # Permisos para acceder a volúmenes persistentes
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+
+  # Permisos para leer endpoints
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch"]
+
+---
+# ── RoleBinding para Fabric (Namespace local) ────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fabric-role-binding
+  namespace: fabric
+  labels:
+    app: fabric
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fabric-cluster-role
+subjects:
+  - kind: ServiceAccount
+    name: fabric
+    namespace: fabric
+
+---
+# ── NetworkPolicy (opcional, pero recomendado para seguridad) ──────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fabric-network-policy
+  namespace: fabric
+  labels:
+    app: fabric
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Permitir tráfico desde pods dentro del namespace fabric
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 7051   # peer
+        - protocol: TCP
+          port: 7052   # chaincode
+        - protocol: TCP
+          port: 7054   # ca-org1
+        - protocol: TCP
+          port: 8054   # ca-org2
+        - protocol: TCP
+          port: 9054   # ca-orderer
+        - protocol: TCP
+          port: 7050   # orderer
+        - protocol: TCP
+          port: 5984   # couchdb
+        - protocol: TCP
+          port: 9051   # peer org2
+        - protocol: TCP
+          port: 9052   # chaincode org2
+
+  egress:
+    # Permitir salida a cualquier sitio (necesario para descargar imágenes, DNS)
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+    # Permitir salida intra-namespace
+    - to:
+        - podSelector: {}
