@@ -1,0 +1,25 @@
+{
+  "name": "autovault-car-cc",
+  "version": "1.0.0",
+  "description": "Chaincode de inventario de autos coleccionables — AutoVault VIP",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "keywords": ["hyperledger-fabric", "chaincode", "smart-contract", "automotive", "collectible-cars"],
+  "author": "AutoVault Team",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=18.0.0" },
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "start": "fabric-chaincode-node start",
+    "dev": "npm run build && npm run start"
+  },
+  "dependencies": {
+    "fabric-contract-api": "^2.5.0",
+    "fabric-shim": "^2.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}
