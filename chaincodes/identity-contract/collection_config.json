@@ -1,0 +1,14 @@
+[
+  {
+    "name": "AutoVaultClientPII",
+    "policy": "OR('AutoVaultMSP.member', 'ClientesVIPMSP.member')",
+    "requiredPeerCount": 1,
+    "maxPeerCount": 3,
+    "blockToLive": 0,
+    "memberOnlyRead": true,
+    "memberOnlyWrite": false,
+    "endorsementPolicy": {
+      "signaturePolicy": "OR('AutoVaultMSP.member')"
+    }
+  }
+]
