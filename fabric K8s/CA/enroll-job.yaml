@@ -1,0 +1,453 @@
+---
+# ═══════════════════════════════════════════════════════════════════════════
+#  Job — Register & Enroll
+#
+#  Este Job espera a que las 3 CAs estén Ready, luego ejecuta el script
+#  registerEnroll adaptado para K8s (URLs internas del cluster).
+#
+#  Resultado: los materiales criptográficos quedan en el PVC "crypto-store"
+#  compartido, disponible para los deployments de peers y orderer.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── PVC compartido para materiales criptográficos ─────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: crypto-store
+  namespace: fabric
+  labels:
+    app: fabric-crypto
+spec:
+  accessModes:
+    - ReadWriteOnce       # Cambiar a ReadWriteMany si tienes NFS/EFS/GCS
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 2Gi
+
+---
+# ── ConfigMap con el script de enroll ────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: enroll-script
+  namespace: fabric
+data:
+  registerEnroll.sh: |
+    #!/bin/bash
+    set -e
+
+    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+    info()  { echo -e "${GREEN}[INFO]${NC}  $1"; }
+    warn()  { echo -e "${YELLOW}[WARN]${NC}  $1"; }
+    error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+
+    CRYPTO_DIR=/crypto-store
+
+    # ── Espera activa hasta que el CA responda ──────────────────────────────
+    waitForCA() {
+      local URL=$1
+      local CERT=$2
+      local NAME=$3
+      local RETRIES=20
+      info "Esperando CA: $NAME ($URL)..."
+      for i in $(seq 1 $RETRIES); do
+        if fabric-ca-client getcainfo -u "$URL" --tls.certfiles "$CERT" >/dev/null 2>&1; then
+          info "CA $NAME disponible ✓"
+          return 0
+        fi
+        warn "Intento $i/$RETRIES — esperando 5s..."
+        sleep 5
+      done
+      error "Timeout esperando $NAME"
+    }
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  ORG 1
+    # ══════════════════════════════════════════════════════════════════════
+    setupOrg1() {
+      local CA_URL="https://ca-org1.fabric.svc.cluster.local:7054"
+      local CA_TLS="/crypto-store/ca-org1-tls/tls-cert.pem"
+      local ORG_DIR="$CRYPTO_DIR/peerOrganizations/org1.example.com"
+
+      # Espera TLS cert del CA (copiado por init container)
+      waitForCA "$CA_URL" "$CA_TLS" "ca-org1"
+
+      export FABRIC_CA_CLIENT_HOME="$ORG_DIR"
+      mkdir -p "$ORG_DIR/msp/cacerts" "$ORG_DIR/msp/tlscacerts"
+
+      # 1. Enroll admin CA
+      info "[Org1] Enroll CA admin..."
+      fabric-ca-client enroll -u "$CA_URL" --caname ca-org1 \
+        --tls.certfiles "$CA_TLS" -M "$ORG_DIR/msp"
+
+      cp "$ORG_DIR/msp/cacerts/"*.pem \
+         "$ORG_DIR/msp/cacerts/ca.org1.example.com-cert.pem" 2>/dev/null || true
+
+      # 2. NodeOU config
+      cat > "$ORG_DIR/msp/config.yaml" <<EOF
+    NodeOUs:
+      Enable: true
+      ClientOUIdentifier:
+        Certificate: cacerts/ca.org1.example.com-cert.pem
+        OrganizationalUnitIdentifier: client
+      PeerOUIdentifier:
+        Certificate: cacerts/ca.org1.example.com-cert.pem
+        OrganizationalUnitIdentifier: peer
+      AdminOUIdentifier:
+        Certificate: cacerts/ca.org1.example.com-cert.pem
+        OrganizationalUnitIdentifier: admin
+      OrdererOUIdentifier:
+        Certificate: cacerts/ca.org1.example.com-cert.pem
+        OrganizationalUnitIdentifier: orderer
+    EOF
+
+      # 3. Registrar identidades
+      fabric-ca-client register --caname ca-org1 \
+        --id.name peer0 --id.secret peer0pw --id.type peer \
+        --tls.certfiles "$CA_TLS"
+
+      fabric-ca-client register --caname ca-org1 \
+        --id.name org1admin --id.secret org1adminpw --id.type admin \
+        --tls.certfiles "$CA_TLS"
+
+      fabric-ca-client register --caname ca-org1 \
+        --id.name user1 --id.secret user1pw --id.type client \
+        --tls.certfiles "$CA_TLS"
+
+      # 4. Enroll peer0 (MSP)
+      local PEER_DIR="$ORG_DIR/peers/peer0.org1.example.com"
+      mkdir -p "$PEER_DIR"
+      fabric-ca-client enroll -u "$CA_URL" --caname ca-org1 \
+        -M "$PEER_DIR/msp" \
+        --csr.hosts peer0-org1,peer0-org1.fabric.svc.cluster.local \
+        --tls.certfiles "$CA_TLS"
+      cp "$ORG_DIR/msp/config.yaml" "$PEER_DIR/msp/config.yaml"
+
+      # 5. Enroll peer0 (TLS)
+      fabric-ca-client enroll -u "$CA_URL" --caname ca-org1 \
+        -M "$PEER_DIR/tls" --enrollment.profile tls \
+        --csr.hosts "peer0-org1,peer0-org1.fabric.svc.cluster.local,localhost" \
+        --tls.certfiles "$CA_TLS"
+
+      local TLS="$PEER_DIR/tls"
+      cp "$TLS/tlscacerts/"*.pem "$TLS/ca.crt"
+      cp "$TLS/signcerts/"*.pem  "$TLS/server.crt"
+      cp "$TLS/keystore/"*_sk    "$TLS/server.key"
+      mkdir -p "$ORG_DIR/msp/tlscacerts" "$ORG_DIR/tlsca" "$ORG_DIR/ca"
+      cp "$TLS/ca.crt" "$ORG_DIR/msp/tlscacerts/tlsca.org1.example.com-cert.pem"
+      cp "$TLS/ca.crt" "$ORG_DIR/tlsca/tlsca.org1.example.com-cert.pem"
+      cp "$ORG_DIR/msp/cacerts/"*.pem "$ORG_DIR/ca/ca.org1.example.com-cert.pem"
+
+      # 6. Enroll Admin
+      mkdir -p "$ORG_DIR/users/Admin@org1.example.com"
+      fabric-ca-client enroll -u "$CA_URL" --caname ca-org1 \
+        -M "$ORG_DIR/users/Admin@org1.example.com/msp" \
+        --tls.certfiles "$CA_TLS"
+      cp "$ORG_DIR/msp/config.yaml" \
+         "$ORG_DIR/users/Admin@org1.example.com/msp/config.yaml"
+
+      # 7. Enroll User1
+      mkdir -p "$ORG_DIR/users/User1@org1.example.com"
+      fabric-ca-client enroll -u "$CA_URL" --caname ca-org1 \
+        -M "$ORG_DIR/users/User1@org1.example.com/msp" \
+        --tls.certfiles "$CA_TLS"
+      cp "$ORG_DIR/msp/config.yaml" \
+         "$ORG_DIR/users/User1@org1.example.com/msp/config.yaml"
+
+      info "[Org1] ✓ Completado"
+    }
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  ORG 2
+    # ══════════════════════════════════════════════════════════════════════
+    setupOrg2() {
+      local CA_URL="https://ca-org2.fabric.svc.cluster.local:8054"
+      local CA_TLS="/crypto-store/ca-org2-tls/tls-cert.pem"
+      local ORG_DIR="$CRYPTO_DIR/peerOrganizations/org2.example.com"
+
+      waitForCA "$CA_URL" "$CA_TLS" "ca-org2"
+
+      export FABRIC_CA_CLIENT_HOME="$ORG_DIR"
+      mkdir -p "$ORG_DIR/msp/cacerts"
+
+      fabric-ca-client enroll -u "$CA_URL" --caname ca-org2 \
+        --tls.certfiles "$CA_TLS" -M "$ORG_DIR/msp"
+
+      cp "$ORG_DIR/msp/cacerts/"*.pem \
+         "$ORG_DIR/msp/cacerts/ca.org2.example.com-cert.pem" 2>/dev/null || true
+
+      cat > "$ORG_DIR/msp/config.yaml" <<EOF
+    NodeOUs:
+      Enable: true
+      ClientOUIdentifier:
+        Certificate: cacerts/ca.org2.example.com-cert.pem
+        OrganizationalUnitIdentifier: client
+      PeerOUIdentifier:
+        Certificate: cacerts/ca.org2.example.com-cert.pem
+        OrganizationalUnitIdentifier: peer
+      AdminOUIdentifier:
+        Certificate: cacerts/ca.org2.example.com-cert.pem
+        OrganizationalUnitIdentifier: admin
+      OrdererOUIdentifier:
+        Certificate: cacerts/ca.org2.example.com-cert.pem
+        OrganizationalUnitIdentifier: orderer
+    EOF
+
+      fabric-ca-client register --caname ca-org2 \
+        --id.name peer0 --id.secret peer0pw --id.type peer \
+        --tls.certfiles "$CA_TLS"
+      fabric-ca-client register --caname ca-org2 \
+        --id.name org2admin --id.secret org2adminpw --id.type admin \
+        --tls.certfiles "$CA_TLS"
+      fabric-ca-client register --caname ca-org2 \
+        --id.name user1 --id.secret user1pw --id.type client \
+        --tls.certfiles "$CA_TLS"
+
+      local PEER_DIR="$ORG_DIR/peers/peer0.org2.example.com"
+      mkdir -p "$PEER_DIR"
+      fabric-ca-client enroll -u "$CA_URL" --caname ca-org2 \
+        -M "$PEER_DIR/msp" \
+        --csr.hosts peer0-org2,peer0-org2.fabric.svc.cluster.local \
+        --tls.certfiles "$CA_TLS"
+      cp "$ORG_DIR/msp/config.yaml" "$PEER_DIR/msp/config.yaml"
+
+      fabric-ca-client enroll -u "$CA_URL" --caname ca-org2 \
+        -M "$PEER_DIR/tls" --enrollment.profile tls \
+        --csr.hosts "peer0-org2,peer0-org2.fabric.svc.cluster.local,localhost" \
+        --tls.certfiles "$CA_TLS"
+
+      local TLS="$PEER_DIR/tls"
+      cp "$TLS/tlscacerts/"*.pem "$TLS/ca.crt"
+      cp "$TLS/signcerts/"*.pem  "$TLS/server.crt"
+      cp "$TLS/keystore/"*_sk    "$TLS/server.key"
+      mkdir -p "$ORG_DIR/msp/tlscacerts" "$ORG_DIR/tlsca" "$ORG_DIR/ca"
+      cp "$TLS/ca.crt" "$ORG_DIR/msp/tlscacerts/tlsca.org2.example.com-cert.pem"
+      cp "$TLS/ca.crt" "$ORG_DIR/tlsca/tlsca.org2.example.com-cert.pem"
+      cp "$ORG_DIR/msp/cacerts/"*.pem "$ORG_DIR/ca/ca.org2.example.com-cert.pem"
+
+      mkdir -p "$ORG_DIR/users/Admin@org2.example.com"
+      fabric-ca-client enroll -u "$CA_URL" --caname ca-org2 \
+        -M "$ORG_DIR/users/Admin@org2.example.com/msp" \
+        --tls.certfiles "$CA_TLS"
+      cp "$ORG_DIR/msp/config.yaml" \
+         "$ORG_DIR/users/Admin@org2.example.com/msp/config.yaml"
+
+      mkdir -p "$ORG_DIR/users/User1@org2.example.com"
+      fabric-ca-client enroll -u "$CA_URL" --caname ca-org2 \
+        -M "$ORG_DIR/users/User1@org2.example.com/msp" \
+        --tls.certfiles "$CA_TLS"
+      cp "$ORG_DIR/msp/config.yaml" \
+         "$ORG_DIR/users/User1@org2.example.com/msp/config.yaml"
+
+      info "[Org2] ✓ Completado"
+    }
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  ORDERER
+    # ══════════════════════════════════════════════════════════════════════
+    setupOrderer() {
+      local CA_URL="https://ca-orderer.fabric.svc.cluster.local:9054"
+      local CA_TLS="/crypto-store/ca-orderer-tls/tls-cert.pem"
+      local ORG_DIR="$CRYPTO_DIR/ordererOrganizations/example.com"
+
+      waitForCA "$CA_URL" "$CA_TLS" "ca-orderer"
+
+      export FABRIC_CA_CLIENT_HOME="$ORG_DIR"
+      mkdir -p "$ORG_DIR/msp/cacerts"
+
+      # 1. Enroll admin CA
+      info "[Orderer] Enroll CA admin..."
+      fabric-ca-client enroll -u "$CA_URL" --caname ca-orderer \
+        --tls.certfiles "$CA_TLS" -M "$ORG_DIR/msp"
+
+      cp "$ORG_DIR/msp/cacerts/"*.pem \
+         "$ORG_DIR/msp/cacerts/ca.example.com-cert.pem" 2>/dev/null || true
+
+      # 2. NodeOU config
+      cat > "$ORG_DIR/msp/config.yaml" <<EOF
+    NodeOUs:
+      Enable: true
+      ClientOUIdentifier:
+        Certificate: cacerts/ca.example.com-cert.pem
+        OrganizationalUnitIdentifier: client
+      PeerOUIdentifier:
+        Certificate: cacerts/ca.example.com-cert.pem
+        OrganizationalUnitIdentifier: peer
+      AdminOUIdentifier:
+        Certificate: cacerts/ca.example.com-cert.pem
+        OrganizationalUnitIdentifier: admin
+      OrdererOUIdentifier:
+        Certificate: cacerts/ca.example.com-cert.pem
+        OrganizationalUnitIdentifier: orderer
+    EOF
+
+      # 3. Registrar identidades
+      fabric-ca-client register --caname ca-orderer \
+        --id.name orderer0 --id.secret orderer0pw --id.type orderer \
+        --tls.certfiles "$CA_TLS"
+
+      fabric-ca-client register --caname ca-orderer \
+        --id.name ordereradmin --id.secret ordereradminpw --id.type admin \
+        --tls.certfiles "$CA_TLS"
+
+      # 4. Enroll orderer0 (MSP)
+      local ORDERER_DIR="$ORG_DIR/orderers/orderer0.example.com"
+      mkdir -p "$ORDERER_DIR"
+      fabric-ca-client enroll -u "$CA_URL" --caname ca-orderer \
+        -M "$ORDERER_DIR/msp" \
+        --csr.hosts orderer0,orderer0.fabric.svc.cluster.local \
+        --tls.certfiles "$CA_TLS"
+      cp "$ORG_DIR/msp/config.yaml" "$ORDERER_DIR/msp/config.yaml"
+
+      # 5. Enroll orderer0 (TLS)
+      fabric-ca-client enroll -u "$CA_URL" --caname ca-orderer \
+        -M "$ORDERER_DIR/tls" --enrollment.profile tls \
+        --csr.hosts "orderer0,orderer0.fabric.svc.cluster.local,localhost" \
+        --tls.certfiles "$CA_TLS"
+
+      local TLS="$ORDERER_DIR/tls"
+      cp "$TLS/tlscacerts/"*.pem "$TLS/ca.crt"
+      cp "$TLS/signcerts/"*.pem  "$TLS/server.crt"
+      cp "$TLS/keystore/"*_sk    "$TLS/server.key"
+      mkdir -p "$ORG_DIR/msp/tlscacerts" "$ORG_DIR/tlsca" "$ORG_DIR/ca"
+      cp "$TLS/ca.crt" "$ORG_DIR/msp/tlscacerts/tlsca.example.com-cert.pem"
+      cp "$TLS/ca.crt" "$ORG_DIR/tlsca/tlsca.example.com-cert.pem"
+      cp "$ORG_DIR/msp/cacerts/"*.pem "$ORG_DIR/ca/ca.example.com-cert.pem"
+
+      # 6. Enroll Admin
+      mkdir -p "$ORG_DIR/users/Admin@example.com"
+      fabric-ca-client enroll -u "$CA_URL" --caname ca-orderer \
+        -M "$ORG_DIR/users/Admin@example.com/msp" \
+        --tls.certfiles "$CA_TLS"
+      cp "$ORG_DIR/msp/config.yaml" \
+         "$ORG_DIR/users/Admin@example.com/msp/config.yaml"
+
+      info "[Orderer] ✓ Completado"
+    }
+
+    setupOrg1
+    setupOrg2
+    setupOrderer
+    info "🎉 Todos los materiales criptográficos generados en $CRYPTO_DIR"
+
+---
+# ── Job que ejecuta el enroll ────────────────────────────────────────────
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fabric-enroll
+  namespace: fabric
+  labels:
+    app: fabric-enroll
+spec:
+  ttlSecondsAfterFinished: 300     # Limpia el pod 5 min después de completar
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: fabric-enroll
+    spec:
+      restartPolicy: OnFailure
+      # ── Init containers: copia los TLS certs de cada CA al PVC ────────────
+      initContainers:
+        - name: fetch-ca-org1-tls
+          image: hyperledger/fabric-ca:1.5.7
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /crypto-store/ca-org1-tls
+              # Espera a que el pod de ca-org1 esté listo y tenga el cert
+              for i in $(seq 1 30); do
+                if [ -f /ca-org1-data/tls-cert.pem ]; then
+                  cp /ca-org1-data/tls-cert.pem /crypto-store/ca-org1-tls/tls-cert.pem
+                  echo "TLS cert de ca-org1 copiado ✓"
+                  exit 0
+                fi
+                echo "Esperando tls-cert.pem de ca-org1... ($i/30)"
+                sleep 5
+              done
+              echo "ERROR: tls-cert.pem de ca-org1 no encontrado"
+              exit 1
+          volumeMounts:
+            - name: crypto-store
+              mountPath: /crypto-store
+            - name: ca-org1-data
+              mountPath: /ca-org1-data
+
+        - name: fetch-ca-org2-tls
+          image: hyperledger/fabric-ca:1.5.7
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /crypto-store/ca-org2-tls
+              for i in $(seq 1 30); do
+                if [ -f /ca-org2-data/tls-cert.pem ]; then
+                  cp /ca-org2-data/tls-cert.pem /crypto-store/ca-org2-tls/tls-cert.pem
+                  echo "TLS cert de ca-org2 copiado ✓"
+                  exit 0
+                fi
+                echo "Esperando tls-cert.pem de ca-org2... ($i/30)"
+                sleep 5
+              done
+              exit 1
+          volumeMounts:
+            - name: crypto-store
+              mountPath: /crypto-store
+            - name: ca-org2-data
+              mountPath: /ca-org2-data
+
+        - name: fetch-ca-orderer-tls
+          image: hyperledger/fabric-ca:1.5.7
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /crypto-store/ca-orderer-tls
+              for i in $(seq 1 30); do
+                if [ -f /ca-orderer-data/tls-cert.pem ]; then
+                  cp /ca-orderer-data/tls-cert.pem /crypto-store/ca-orderer-tls/tls-cert.pem
+                  echo "TLS cert de ca-orderer copiado ✓"
+                  exit 0
+                fi
+                echo "Esperando tls-cert.pem de ca-orderer... ($i/30)"
+                sleep 5
+              done
+              exit 1
+          volumeMounts:
+            - name: crypto-store
+              mountPath: /crypto-store
+            - name: ca-orderer-data
+              mountPath: /ca-orderer-data
+
+      containers:
+        - name: enroll
+          image: hyperledger/fabric-ca:1.5.7
+          command:
+            - sh
+            - /scripts/registerEnroll.sh
+          volumeMounts:
+            - name: crypto-store
+              mountPath: /crypto-store
+            - name: enroll-script
+              mountPath: /scripts
+
+      volumes:
+        - name: crypto-store
+          persistentVolumeClaim:
+            claimName: crypto-store
+        - name: ca-org1-data
+          persistentVolumeClaim:
+            claimName: ca-org1-pvc
+        - name: ca-org2-data
+          persistentVolumeClaim:
+            claimName: ca-org2-pvc
+        - name: ca-orderer-data
+          persistentVolumeClaim:
+            claimName: ca-orderer-pvc
+        - name: enroll-script
+          configMap:
+            name: enroll-script
+            defaultMode: 0755
