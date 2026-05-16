@@ -1,0 +1,23 @@
+{
+  "name": "autovault-maintenance-cc",
+  "version": "1.0.0",
+  "description": "Chaincode de servicios a domicilio — AutoVault VIP",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "start": "fabric-chaincode-node start",
+    "dev": "npm run build && npm run start",
+    "lint": "eslint src/**/*.ts"
+  },
+  "engines": { "node": ">=18.0.0" },
+  "dependencies": {
+    "fabric-contract-api": "^2.5.0",
+    "fabric-shim": "^2.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}
