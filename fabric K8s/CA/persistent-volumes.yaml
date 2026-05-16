@@ -1,0 +1,61 @@
+---
+# ─────────────────────────────────────────────────────────────────────────────
+#  PersistentVolumeClaims para las CAs de Fabric
+#
+#  IMPORTANTE: Ajusta storageClassName al de tu cluster:
+#    - GKE:  standard-rwo  /  premium-rwo
+#    - EKS:  gp2  /  gp3
+#    - AKS:  managed-premium
+#    - Local (minikube/kind):  standard  /  local-path
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── CA Org1 ──────────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ca-org1-pvc
+  namespace: fabric
+  labels:
+    app: ca-org1
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard        # ← cambia según tu cluster
+  resources:
+    requests:
+      storage: 1Gi
+
+# ── CA Org2 ──────────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ca-org2-pvc
+  namespace: fabric
+  labels:
+    app: ca-org2
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 1Gi
+
+# ── CA Orderer ────────────────────────────────────────────────────────────────
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ca-orderer-pvc
+  namespace: fabric
+  labels:
+    app: ca-orderer
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 1Gi
