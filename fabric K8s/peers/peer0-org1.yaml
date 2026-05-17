@@ -1,0 +1,217 @@
+---
+# ═══════════════════════════════════════════════════════════
+#  Peer0 — Org1
+#
+#  IMPORTANTE: Los certificados se montan desde el PVC
+#  "crypto-store" generado por las CAs.
+#
+#  Estructura esperada dentro del PVC:
+#  /crypto-store/
+#  └── peerOrganizations/
+#      └── org1.example.com/
+#          ├── msp/                        ← MSP de la org
+#          └── peers/
+#              └── peer0.org1.example.com/
+#                  ├── msp/               ← MSP del peer
+#                  └── tls/               ← ca.crt / server.crt / server.key
+# ═══════════════════════════════════════════════════════════
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: peer0-org1-pvc
+  namespace: fabric
+  labels:
+    app: peer0-org1
+    org: org1
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard        # ← ajusta según tu cluster
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: peer0-org1
+  namespace: fabric
+  labels:
+    app: peer0-org1
+    org: org1
+    component: peer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: peer0-org1
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: peer0-org1
+        org: org1
+        component: peer
+    spec:
+      # Necesita acceso al socket de Docker para instalar chaincode
+      # (solo si usas chaincode externo / builder clásico)
+      # Si usas Chaincode-as-a-Service (CCaaS) puedes quitar esto
+      volumes:
+        - name: peer-data
+          persistentVolumeClaim:
+            claimName: peer0-org1-pvc
+        - name: crypto-store
+          persistentVolumeClaim:
+            claimName: crypto-store   # ← PVC con los certs de las CAs
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+
+      containers:
+        - name: peer
+          image: hyperledger/fabric-peer:2.5.4
+          imagePullPolicy: IfNotPresent
+          env:
+            # ── Identidad del peer ────────────────────────────────────────
+            - name: CORE_PEER_ID
+              value: peer0.org1.example.com
+            - name: CORE_PEER_LOCALMSPID
+              value: Org1MSP
+            - name: CORE_PEER_MSPCONFIGPATH
+              value: /etc/hyperledger/fabric/msp
+
+            # ── Red ───────────────────────────────────────────────────────
+            - name: CORE_PEER_ADDRESS
+              value: peer0-org1.fabric.svc.cluster.local:7051
+            - name: CORE_PEER_LISTENADDRESS
+              value: 0.0.0.0:7051
+            - name: CORE_PEER_CHAINCODEADDRESS
+              value: peer0-org1.fabric.svc.cluster.local:7052
+            - name: CORE_PEER_CHAINCODELISTENADDRESS
+              value: 0.0.0.0:7052
+
+            # ── Gossip ───────────────────────────────────────────────────
+            - name: CORE_PEER_GOSSIP_BOOTSTRAP
+              value: peer0-org1.fabric.svc.cluster.local:7051
+            - name: CORE_PEER_GOSSIP_EXTERNALENDPOINT
+              value: peer0-org1.fabric.svc.cluster.local:7051
+            - name: CORE_PEER_GOSSIP_USELEADERELECTION
+              value: "true"
+            - name: CORE_PEER_GOSSIP_ORGLEADER
+              value: "false"
+
+            # ── TLS ──────────────────────────────────────────────────────
+            - name: CORE_PEER_TLS_ENABLED
+              value: "true"
+            - name: CORE_PEER_TLS_CERT_FILE
+              value: /etc/hyperledger/fabric/tls/server.crt
+            - name: CORE_PEER_TLS_KEY_FILE
+              value: /etc/hyperledger/fabric/tls/server.key
+            - name: CORE_PEER_TLS_ROOTCERT_FILE
+              value: /etc/hyperledger/fabric/tls/ca.crt
+
+            # ── CouchDB ──────────────────────────────────────────────────
+            - name: CORE_LEDGER_STATE_STATEDATABASE
+              value: CouchDB
+            - name: CORE_LEDGER_STATE_COUCHDBCONFIG_COUCHDBADDRESS
+              value: couchdb-org1.fabric.svc.cluster.local:5984
+            - name: CORE_LEDGER_STATE_COUCHDBCONFIG_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: fabric-couchdb-credentials
+                  key: YOUR_SECURE_PASSWORD
+            - name: CORE_LEDGER_STATE_COUCHDBCONFIG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fabric-couchdb-credentials
+                  key: YOUR_SECURE_PASSWORD
+            # ── Logs ─────────────────────────────────────────────────────
+            - name: FABRIC_LOGGING_SPEC
+              value: INFO
+            - name: CORE_PEER_FILESYSTEMPATH
+              value: /var/hyperledger/production
+
+            # ── Docker (para chaincode builder clásico) ──────────────────
+            - name: CORE_VM_ENDPOINT
+              value: unix:///var/run/docker.sock
+            - name: CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE
+              value: fabric
+
+          ports:
+            - name: peer
+              containerPort: 7051
+              protocol: TCP
+            - name: chaincode
+              containerPort: 7052
+              protocol: TCP
+            - name: operations
+              containerPort: 9443
+              protocol: TCP
+
+          volumeMounts:
+            - name: peer-data
+              mountPath: /var/hyperledger/production
+            # MSP del peer
+            - name: crypto-store
+              mountPath: /etc/hyperledger/fabric/msp
+              subPath: peerOrganizations/org1.example.com/peers/peer0.org1.example.com/msp
+            # TLS del peer
+            - name: crypto-store
+              mountPath: /etc/hyperledger/fabric/tls
+              subPath: peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls
+            # Docker socket (chaincode builder clásico)
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9443
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9443
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 300m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: peer0-org1
+  namespace: fabric
+  labels:
+    app: peer0-org1
+    org: org1
+spec:
+  selector:
+    app: peer0-org1
+  ports:
+    - name: peer
+      port: 7051
+      targetPort: 7051
+      protocol: TCP
+    - name: chaincode
+      port: 7052
+      targetPort: 7052
+      protocol: TCP
+    - name: operations
+      port: 9443
+      targetPort: 9443
+      protocol: TCP
+  type: ClusterIP
