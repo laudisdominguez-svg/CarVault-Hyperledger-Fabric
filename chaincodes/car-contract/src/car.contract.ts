@@ -287,7 +287,7 @@ export class CarContract extends Contract {
       );
     }
 
-  // Validar kilometraje: no negativo
+    // Validar kilometraje: no negativo
     const kmNum = parseInt(kilometraje, 10);
     if (isNaN(kmNum) || kmNum < 0) {
       throw new Error(`Kilometraje inválido: debe ser un número no negativo. Recibido: ${kilometraje}.`);
@@ -443,7 +443,7 @@ export class CarContract extends Contract {
   // VALUACIÓN
   // ───────────────────────────────────────────────────────────────────────────
 
- /**
+  /**
    * UpdateValuation — solo Admin / Asesor (AutoVaultMSP)
    *
    * Solo los admins actualizan la valuación oficial del auto.
@@ -683,8 +683,9 @@ export class CarContract extends Contract {
         limit: 1,
       });
       const iterator = await ctx.stub.getQueryResult(queryString);
-      for await (const result of iterator) {
-        const nextPhoto: CarPhoto = JSON.parse(result.value.toString());
+      let result = await iterator.next();
+      while (!result.done) {
+        const nextPhoto: CarPhoto = JSON.parse(result.value.value.toString());
         nextPhoto.esPrincipal = true;
         await ctx.stub.putState(
           `CARPHOTO_${carId}_${nextPhoto.photoId}`,
@@ -695,6 +696,7 @@ export class CarContract extends Contract {
         );
         break;
       }
+      await iterator.close();
     }
 
     ctx.stub.setEvent(
@@ -831,7 +833,7 @@ export class CarContract extends Contract {
       );
     }
 
-  const adminId = ctx.clientIdentity.getID();
+    const adminId = ctx.clientIdentity.getID();
     const deletionTime = new Date().toISOString();
 
     // Crear registro inmutable de eliminación (auditoría)
@@ -855,9 +857,20 @@ export class CarContract extends Contract {
       selector: { docType: 'carDocument', carId },
     });
     const docIterator = await ctx.stub.getQueryResult(docQuery);
-    for await (const result of docIterator) {
-      const doc: CarDocument = JSON.parse(result.value.toString());
-      await ctx.stub.deleteState(`CARDOC_${carId}_${doc.docId}`);
+    try {
+      // StateQueryIterator does not implement async iterable in this environment
+      // Use explicit next()/hasNext() pattern
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const res = await docIterator.next();
+        if (res.value && res.value.value) {
+          const doc: CarDocument = JSON.parse(res.value.value.toString());
+          await ctx.stub.deleteState(`CARDOC_${carId}_${doc.docId}`);
+        }
+        if (res.done) break;
+      }
+    } finally {
+      await docIterator.close();
     }
 
     // Eliminar fotos del auto
@@ -865,9 +878,19 @@ export class CarContract extends Contract {
       selector: { docType: 'carPhoto', carId },
     });
     const photoIterator = await ctx.stub.getQueryResult(photoQuery);
-    for await (const result of photoIterator) {
-      const photo: CarPhoto = JSON.parse(result.value.toString());
-      await ctx.stub.deleteState(`CARPHOTO_${carId}_${photo.photoId}`);
+    try {
+      // Iterate using next() because StateQueryIterator lacks async iterator
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const res = await photoIterator.next();
+        if (res.value && res.value.value) {
+          const photo: CarPhoto = JSON.parse(res.value.value.toString());
+          await ctx.stub.deleteState(`CARPHOTO_${carId}_${photo.photoId}`);
+        }
+        if (res.done) break;
+      }
+    } finally {
+      await photoIterator.close();
     }
 
     // Eliminar el auto
@@ -935,11 +958,22 @@ export class CarContract extends Contract {
     const iterator = await ctx.stub.getQueryResult(queryString);
     const cars: any[] = [];
 
-    for await (const result of iterator) {
-      const car: any = JSON.parse(result.value.toString());
-      // Filtrar notas internas si es el cliente
-      if (!this._isAdmin(ctx)) delete car.notasInternas;
-      cars.push(car);
+    // StateQueryIterator no expone [Symbol.asyncIterator] en algunos tipos,
+    // usar su API .next() para iterar de forma compatible.
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const res = await iterator.next();
+      if (res.value) {
+        // res.value es un objeto { key, value } donde value es Buffer
+        const car: any = JSON.parse(res.value.value.toString());
+        // Filtrar notas internas si es el cliente
+        if (!this._isAdmin(ctx)) delete car.notasInternas;
+        cars.push(car);
+      }
+      if (res.done) {
+        await iterator.close();
+        break;
+      }
     }
 
     return JSON.stringify(cars);
@@ -966,7 +1000,9 @@ export class CarContract extends Contract {
     const historyIterator = await ctx.stub.getHistoryForKey(`CAR_${carId}`);
     const history: object[] = [];
 
-    for await (const modification of historyIterator) {
+    let result = await historyIterator.next();
+    while (!result.done) {
+      const modification = result.value;
       const entry: any = {
         txId:      modification.txId,
         timestamp: modification.timestamp,
@@ -1005,8 +1041,10 @@ export class CarContract extends Contract {
 
     const iterator = await ctx.stub.getQueryResult(queryString);
     const docs: CarDocument[] = [];
-    for await (const result of iterator) {
-      docs.push(JSON.parse(result.value.toString()));
+    let result = await iterator.next();
+    while (!result.done) {
+      docs.push(JSON.parse(result.value.value.toString()));
+      result = await iterator.next();
     }
 
     return JSON.stringify(docs);
@@ -1030,8 +1068,10 @@ export class CarContract extends Contract {
 
     const iterator = await ctx.stub.getQueryResult(queryString);
     const photos: CarPhoto[] = [];
-    for await (const result of iterator) {
+    let result = await iterator.next();
+    while (!result.done) {
       photos.push(JSON.parse(result.value.toString()));
+      result = await iterator.next();
     }
 
     return JSON.stringify(photos);
@@ -1091,10 +1131,16 @@ export class CarContract extends Contract {
       },
     });
     const iterator = await ctx.stub.getQueryResult(queryString);
-    for await (const _ of iterator) {
-      throw new Error(
-        `El VIN ${vin} ya está registrado. Un mismo auto no puede estar en dos cuentas.`,
-      );
+    // StateQueryIterator no implementa Symbol.asyncIterator en algunas versiones,
+    // por lo que usamos next() explícitamente.
+    while (true) {
+      const { done, value } = await iterator.next();
+      if (done) break;
+      if (value) {
+        throw new Error(
+          `El VIN ${vin} ya está registrado. Un mismo auto no puede estar en dos cuentas.`,
+        );
+      }
     }
   }
 
@@ -1186,7 +1232,11 @@ export class CarContract extends Contract {
     });
     const iterator = await ctx.stub.getQueryResult(queryString);
     let count = 0;
-    for await (const _ of iterator) count++;
+    let result = await iterator.next();
+    while (!result.done) {
+      count++;
+      result = await iterator.next();
+    }
     return count;
   }
 
@@ -1198,7 +1248,11 @@ export class CarContract extends Contract {
     });
     const iterator = await ctx.stub.getQueryResult(queryString);
     let count = 0;
-    for await (const _ of iterator) count++;
+    let result = await iterator.next();
+    while (!result.done) {
+      count++;
+      result = await iterator.next();
+    }
     return count;
   }
 
@@ -1211,13 +1265,15 @@ export class CarContract extends Contract {
       selector: { docType: 'carPhoto', carId, esPrincipal: true },
     });
     const iterator = await ctx.stub.getQueryResult(queryString);
-    for await (const result of iterator) {
+    let result = await iterator.next();
+    while (!result.done) {
       const photo: CarPhoto = JSON.parse(result.value.toString());
       photo.esPrincipal = false;
       await ctx.stub.putState(
         `CARPHOTO_${carId}_${photo.photoId}`,
         Buffer.from(JSON.stringify(photo)),
       );
+      result = await iterator.next();
     }
   }
 
